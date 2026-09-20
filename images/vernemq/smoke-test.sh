@@ -16,10 +16,24 @@
 #   - An account is bound to its CLIENT ID as well as its username: the ACL
 #     table's primary key is (mountpoint, client_id, username), so the same
 #     username from a different client id is refused outright.
-#   - MQTT over TLS is BROKEN on this build: the handshake completes and then
-#     the broker answers a CONNECT with nothing and closes. See the change
-#     record. The plaintext listener below is a DIAGNOSTIC, not the shipping
-#     configuration - ADR-0012 §8 requires TLS.
+#   - An SSL listener and vmq_diversity database auth DO NOT WORK TOGETHER, on
+#     2.1.1 and 2.2.0 alike. Isolated to that pair: TLS with allow_anonymous
+#     and no plugin works, the same auth over a plaintext listener works, only
+#     the combination fails. The broker logs
+#       vmq_mqtt_fsm:check_user/2:758 ... due to no_matching_hook_found
+#     and terminates with a CONNACK auth error, so the client sees a protocol
+#     or TLS error rather than a refusal.
+#
+#     Mechanism, from vmq_mqtt_fsm.erl: check_user builds its hook arguments
+#     through maybe_append_connection_metadata, which appends a sixth metadata
+#     argument whenever ListenerAddr is defined - which it is for the SSL
+#     listener. That selects auth_on_register/6. Both arities ARE registered
+#     (vmq-admin plugin show), so the miss is inside vmq_diversity's own Lua
+#     dispatch: the bundled auth/postgres.lua does not satisfy the
+#     metadata-carrying variant. forward_connection_opts makes no difference.
+#
+#     The plaintext listener below is a DIAGNOSTIC that isolates this, not the
+#     shipping configuration - ADR-0012 §8 requires TLS.
 #
 # Two traps this script encodes, both of which cost real time:
 #   - An SSL listener REQUIRES cafile. Leave it out and ranch refuses the whole
