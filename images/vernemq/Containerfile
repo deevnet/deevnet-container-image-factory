@@ -1,0 +1,78 @@
+# VerneMQ, built from source (ADR-0012 §8).
+#
+# Why from source. VerneMQ's own release notes for 2.2.0 state: "VerneMQ binary
+# software distribution packages and Docker images are covered by the VerneMQ
+# EULA." The SOURCE is Apache-2.0 (LICENSE.txt at the tag, and GitHub reports
+# spdx_id apache-2.0), so building it ourselves avoids the question entirely.
+# That is the whole reason this image exists rather than a pull in the builder
+# collection's artifacts role.
+#
+# Base images are fully qualified: podman refuses short names when it cannot
+# prompt, which is every non-interactive build.
+
+# VERSION is the upstream release to build, passed by the Makefile from
+# images/vernemq/version. The name is generic because every image in this
+# factory takes the same argument.
+ARG VERSION
+ARG OTP_VERSION=27.3.4.16
+
+# --- build -------------------------------------------------------------------
+# OTP 27.3.4.16 is what upstream compiles its own 2.2.0 binaries with ("Binaries
+# are compiled with Erlang/OTP 27.3.4.16", 2.2.0 release notes), so it is the
+# version least likely to surprise us. The README's stated range is wider:
+# "VerneMQ requires Erlang/OTP 25-28".
+FROM docker.io/library/erlang:${OTP_VERSION} AS build
+
+# The README: "requires Erlang/OTP 25-28 and libsnappy-dev installed in your
+# system. You'll also need a C compiler for Eleveldb." The erlang image is
+# built FROM buildpack-deps:bookworm, so the C toolchain is already present and
+# only libsnappy-dev is missing.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libsnappy-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+ARG VERSION
+WORKDIR /src
+RUN git clone --depth 1 --branch "${VERSION}" https://github.com/vernemq/vernemq.git . \
+ && git rev-parse HEAD > /VERNEMQ_COMMIT
+
+# `make rel` is the documented build. The default release already loads
+# vmq_diversity (the database-auth plugin ADR-0012 §8 needs) and vmq_swc (the
+# cluster metadata store that keeps §8's "must be able to cluster later" open),
+# so neither needs adding. epgsql and bcrypt are direct dependencies of
+# vmq_diversity, so the PostgreSQL driver and client-side bcrypt come with it.
+RUN make rel
+
+# --- runtime -----------------------------------------------------------------
+# `make rel` emits a self-contained release that carries its own ERTS, so the
+# runtime needs no Erlang - only the C libraries the NIFs link against.
+# bookworm matches the build image's base, so the ABI matches.
+FROM docker.io/library/debian:bookworm-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libsnappy1v5 libssl3 libncurses6 ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd -r vernemq && useradd -r -g vernemq -d /vernemq -s /sbin/nologin vernemq
+
+COPY --from=build /src/_build/default/rel/vernemq /vernemq
+COPY --from=build /VERNEMQ_COMMIT /vernemq/VERNEMQ_COMMIT
+
+# The release writes its data, logs and generated config under its own tree.
+# The role bind-mounts persistent paths over these.
+RUN mkdir -p /vernemq/data /vernemq/log /vernemq/etc \
+ && chown -R vernemq:vernemq /vernemq
+
+USER vernemq:vernemq
+WORKDIR /vernemq
+
+# 1883 plain MQTT, 8883 MQTT over TLS, 8888 status/metrics, 44053 + the epmd
+# range for clustering. Only what the role publishes is actually reachable.
+EXPOSE 1883 8883 8888 44053
+
+# No entrypoint script and no DOCKER_VERNEMQ_* environment handling: that is a
+# feature of upstream's own image, not of the release. Configuration is a
+# vernemq.conf the Ansible role templates from inventory, mounted at
+# /vernemq/etc/vernemq.conf - which keeps this image free of site config and
+# leaves inventory owning it (ADR-0009).
+ENTRYPOINT ["/vernemq/bin/vernemq"]
+CMD ["foreground"]
