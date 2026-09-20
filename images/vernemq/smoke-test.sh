@@ -32,11 +32,16 @@
 # Do not flip plugins on a running broker to test things: vmq_plugin_mgr
 # crashes and the node then drops every CONNECT with no log at all.
 set -u
-SC="$(cd "$(dirname "$0")" && pwd)"
-NET=vmq-smoke
-BROKER=vmq-smoke-broker
-DB=vmq-smoke-db
-IMG=localhost/deevnet-vernemq:2.2.0
+# Scratch for certificates and the rendered config. NEVER the script's own
+# directory: this repo's `make stage` refuses a dirty tree, and a smoke run
+# must not be able to stop a release.
+SC="${WORK:-$(mktemp -d -t vernemq-smoke-XXXXXX)}"
+VERNEMQ_VERSION="${VERNEMQ_VERSION:-$(cat "$(dirname "$0")/version")}"
+SUFFIX="$(echo "$VERNEMQ_VERSION" | tr . -)"
+NET=vmq-smoke-$SUFFIX
+BROKER=vmq-smoke-broker-$SUFFIX
+DB=vmq-smoke-db-$SUFFIX
+IMG=localhost/deevnet-vernemq:${VERNEMQ_VERSION}
 PGIMG=docker.io/library/postgres:17.11
 CLIIMG=docker.io/eclipse-mosquitto:2.0.22
 
