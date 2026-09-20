@@ -74,5 +74,13 @@ EXPOSE 1883 8883 8888 44053
 # vernemq.conf the Ansible role templates from inventory, mounted at
 # /vernemq/etc/vernemq.conf - which keeps this image free of site config and
 # leaves inventory owning it (ADR-0009).
+# `console` is the runner's foreground mode - this release's runner has no
+# `foreground` command at all, and `start` daemonises and would exit the
+# container. -noshell -noinput stop the Erlang shell reading a stdin that a
+# detached container does not have.
+#
+# Cuttlefish renders vernemq.conf into /vernemq/data/generated.configs at every
+# boot, so the DATA directory must be writable. /vernemq/etc may be mounted
+# read-only, and the role does exactly that.
 ENTRYPOINT ["/vernemq/bin/vernemq"]
-CMD ["foreground"]
+CMD ["console", "-noshell", "-noinput"]
