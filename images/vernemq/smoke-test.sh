@@ -43,6 +43,12 @@ BROKER=vmq-smoke-broker-$SUFFIX
 DB=vmq-smoke-db-$SUFFIX
 IMG=localhost/deevnet-vernemq:${VERNEMQ_VERSION}
 PGIMG=docker.io/library/postgres:17.11
+# TLS is tested through a PUBLISHED port from the host network, not container to
+# container. Rootless podman's container-to-container path does not carry this
+# TLS session (plaintext MQTT over the same path is fine, and a raw CONNECT
+# from the host gets a proper CONNACK), so testing it that way reports a broken
+# broker when the broker is correct. Cost a lot of time once; do not undo it.
+HOSTPORT=${HOSTPORT:-18883}
 CLIIMG=docker.io/eclipse-mosquitto:2.0.22
 
 cleanup() { podman rm -f $BROKER $DB >/dev/null 2>&1; podman network rm -f $NET >/dev/null 2>&1; }
@@ -55,7 +61,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout ca-key.pem -out ca.pem -days 2
   -subj "/CN=smoke-ca" >/dev/null 2>&1
 openssl req -newkey rsa:2048 -nodes -keyout broker-key.pem -out broker.csr \
   -subj "/CN=$BROKER" >/dev/null 2>&1
-printf "subjectAltName=DNS:%s\n" "$BROKER" > san.cnf
+printf "subjectAltName=DNS:%s,DNS:localhost,IP:127.0.0.1\n" "$BROKER" > san.cnf
 openssl x509 -req -in broker.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial \
   -out broker.pem -days 2 -extfile san.cnf >/dev/null 2>&1
 chmod 644 broker-key.pem
@@ -126,7 +132,7 @@ vmq_diversity.postgres.ssl = off
 log.console = console
 log.console.level = info
 CONF
-podman run -d --name $BROKER --network $NET \
+podman run -d --name $BROKER --network $NET -p 127.0.0.1:$HOSTPORT:8883 \
   -v "$SC/etc/vernemq.conf:/vernemq/etc/vernemq.conf:ro,Z" \
   -v "$SC/tls:/vernemq/etc/tls:ro,Z" \
   $IMG >/dev/null
@@ -143,36 +149,44 @@ if ! podman exec $BROKER /vernemq/bin/vmq-admin listener show 2>/dev/null | grep
 fi
 echo "ok: mqtts listener running"
 
-cli() { podman run --rm --network $NET -v "$SC/tls:/tls:ro,Z" $CLIIMG "$@" 2>&1; }
+cli() { podman run --rm --network host -v "$SC/tls:/tls:ro,Z" $CLIIMG "$@" 2>&1; }
 
 echo "### stack is up; debug manually"
 
-cli() { podman run --rm --network $NET -v "$SC/tls:/tls:ro,Z" $CLIIMG "$@" 2>&1; }
 pass=0; fail=0
 chk() { if [ "$2" = "1" ]; then echo "PASS  $1"; pass=$((pass+1)); else echo "FAIL  $1 -> ${3:-<silence>}"; fail=$((fail+1)); fi; }
 
+# A policy denial and a transport failure are NOT the same result, and a check
+# that cannot tell them apart reports a broken broker as a working one. Every
+# "is it refused?" test below asks two questions: did the broker refuse it, and
+# did the connection actually get far enough for a refusal to mean anything.
+transport_broke() { echo "$1" | grep -qiE "TLS error|unexpected eof|connection was lost|Protocol error"; }
+denied() { echo "$1" | grep -qiE "denied|not authori[sz]ed|Connection Refused|rejected"; }
+refused() { if transport_broke "$1"; then echo 0; elif denied "$1"; then echo 1; else echo 0; fi; }
+allowed() { if transport_broke "$1"; then echo 0; elif denied "$1"; then echo 0; else echo 1; fi; }
+
 echo
 echo "### 4. results"
-r=$(cli mosquitto_pub -h $BROKER -p 8883 --cafile /tls/ca.pem -i eds-stand-1 -u eds-stand-1 -P edspass -t 'eds/lightstand/lp-stand-01/status' -m ok)
-chk "eds publishes inside its own prefix" "$([ -z "$r" ] && echo 1 || echo 0)" "$r"
+r=$(cli mosquitto_pub -h localhost -p $HOSTPORT --cafile /tls/ca.pem -i eds-stand-1 -u eds-stand-1 -P edspass -t 'eds/lightstand/lp-stand-01/status' -m ok)
+chk "eds publishes inside its own prefix" "$(allowed "$r")" "$r"
 
-r=$(cli mosquitto_pub -h $BROKER -p 8883 --cafile /tls/ca.pem -i eds-stand-1 -u eds-stand-1 -P wrongpass -t 'eds/x' -m no)
-chk "wrong password is refused" "$(echo "$r" | grep -qiE 'not authori|refused' && echo 1 || echo 0)" "$r"
+r=$(cli mosquitto_pub -h localhost -p $HOSTPORT --cafile /tls/ca.pem -i eds-stand-1 -u eds-stand-1 -P wrongpass -t 'eds/x' -m no)
+chk "wrong password is refused" "$(refused "$r")" "$r"
 
-r=$(cli mosquitto_pub -h $BROKER -p 8883 --cafile /tls/ca.pem -i probe -t 'eds/x' -m no)
-chk "anonymous is refused" "$(echo "$r" | grep -qiE 'not authori|refused' && echo 1 || echo 0)" "$r"
+r=$(cli mosquitto_pub -h localhost -p $HOSTPORT --cafile /tls/ca.pem -i probe -t 'eds/x' -m no)
+chk "anonymous is refused" "$(refused "$r")" "$r"
 
-r=$(cli mosquitto_pub -h $BROKER -p 8883 --cafile /tls/ca.pem -i eds-stand-1 -u eds-stand-1 -P edspass -t 'tdemo/lightstand/x/scene' -m hijack)
-chk "eds publishing into tdemo/ is refused   [ADR-0012 §10]" "$(echo "$r" | grep -qiE 'denied|not authori|error' && echo 1 || echo 0)" "$r"
+r=$(cli mosquitto_pub -h localhost -p $HOSTPORT --cafile /tls/ca.pem -i eds-stand-1 -u eds-stand-1 -P edspass -t 'tdemo/lightstand/x/scene' -m hijack)
+chk "eds publishing into tdemo/ is refused   [ADR-0012 §10]" "$(refused "$r")" "$r"
 
-r=$(cli mosquitto_sub -h $BROKER -p 8883 --cafile /tls/ca.pem -i eds-stand-1 -u eds-stand-1 -P edspass -t '#' -W 4 -v)
-chk "eds subscribing to '#' is refused       [ADR-0012 §10]" "$(echo "$r" | grep -qiE 'denied|not authori|error|rejected' && echo 1 || echo 0)" "$r"
+r=$(cli mosquitto_sub -h localhost -p $HOSTPORT --cafile /tls/ca.pem -i eds-stand-1 -u eds-stand-1 -P edspass -t '#' -W 4 -v)
+chk "eds subscribing to '#' is refused       [ADR-0012 §10]" "$(refused "$r")" "$r"
 
-r=$(cli mosquitto_sub -h $BROKER -p 8883 --cafile /tls/ca.pem -i eds-stand-1 -u eds-stand-1 -P edspass -t 'tdemo/#' -W 4 -v)
-chk "eds subscribing to tdemo/# is refused   [ADR-0012 §10]" "$(echo "$r" | grep -qiE 'denied|not authori|error|rejected' && echo 1 || echo 0)" "$r"
+r=$(cli mosquitto_sub -h localhost -p $HOSTPORT --cafile /tls/ca.pem -i eds-stand-1 -u eds-stand-1 -P edspass -t 'tdemo/#' -W 4 -v)
+chk "eds subscribing to tdemo/# is refused   [ADR-0012 §10]" "$(refused "$r")" "$r"
 
-r=$(cli mosquitto_sub -h $BROKER -p 8883 --cafile /tls/ca.pem -i eds-stand-1 -u eds-stand-1 -P edspass -t 'eds/#' -W 3 -v)
-chk "eds subscribes to eds/#" "$(echo "$r" | grep -qiE 'denied|not authori|error' && echo 0 || echo 1)" "$r"
+r=$(cli mosquitto_sub -h localhost -p $HOSTPORT --cafile /tls/ca.pem -i eds-stand-1 -u eds-stand-1 -P edspass -t 'eds/#' -W 3 -v)
+chk "eds subscribes to eds/#" "$(allowed "$r")" "$r"
 
 echo
 echo "### $pass passed, $fail failed"
