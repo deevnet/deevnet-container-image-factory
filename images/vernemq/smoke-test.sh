@@ -16,27 +16,18 @@
 #   - An account is bound to its CLIENT ID as well as its username: the ACL
 #     table's primary key is (mountpoint, client_id, username), so the same
 #     username from a different client id is refused outright.
-#   - An SSL listener and vmq_diversity database auth DO NOT WORK TOGETHER, on
-#     2.1.1 and 2.2.0 alike. Isolated to that pair: TLS with allow_anonymous
-#     and no plugin works, the same auth over a plaintext listener works, only
-#     the combination fails. The broker logs
-#       vmq_mqtt_fsm:check_user/2:758 ... due to no_matching_hook_found
-#     and terminates with a CONNACK auth error, so the client sees a protocol
-#     or TLS error rather than a refusal.
+#   - TLS works. MQTT over TLS with PostgreSQL auth, on a TLS-only listener,
+#     passes every check here including ADR-0012 §10's confinement.
 #
-#     Mechanism, from vmq_mqtt_fsm.erl: check_user builds its hook arguments
-#     through maybe_append_connection_metadata, which appends a sixth metadata
-#     argument whenever ListenerAddr is defined - which it is for the SSL
-#     listener. That selects auth_on_register/6. Both arities ARE registered
-#     (vmq-admin plugin show), so the miss is inside vmq_diversity's own Lua
-#     dispatch: the bundled auth/postgres.lua does not satisfy the
-#     metadata-carrying variant. forward_connection_opts makes no difference.
-#
-#     The plaintext listener below is a DIAGNOSTIC that isolates this, not the
-#     shipping configuration - ADR-0012 §8 requires TLS.
+#     An earlier version of this file claimed an SSL listener and database auth
+#     could not work together. That was WRONG, and the cause was this script:
+#     it mounted the broker's TLS directory into the client with :ro,Z, whose
+#     private SELinux label relabelled the directory and left the broker unable
+#     to read its own key. See the mount comment below. No VerneMQ defect was
+#     involved, and nothing needs reporting upstream.
 #
 # Two traps this script encodes, both of which cost real time:
-#   - An SSL listener REQUIRES cafile. Leave it out and ranch refuses the whole
+#   - (removed) An SSL listener REQUIRES cafile. Leave it out and ranch refuses the whole
 #     listener with "Invalid TLS option: {cacertfile,undefined}" - and nothing
 #     says so on the console, only in log/error.log.
 #   - `vernemq ping` answers pong long before the acceptor binds. Wait for
@@ -79,6 +70,15 @@ printf "subjectAltName=DNS:%s,DNS:localhost,IP:127.0.0.1\n" "$BROKER" > san.cnf
 openssl x509 -req -in broker.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial \
   -out broker.pem -days 2 -extfile san.cnf >/dev/null 2>&1
 chmod 644 broker-key.pem
+# The client gets its OWN copy of the CA, mounted :ro,z (shared label).
+#
+# Do not hand the client the broker's TLS directory with :ro,Z. Uppercase Z
+# applies a PRIVATE SELinux label, so each client mount relabels the directory
+# and the broker loses access to its own private key. Ranch does not read the
+# key until a handshake, so the listener still reports running and every TLS
+# handshake then fails silently, with nothing in any log. That cost most of a
+# day and produced a completely wrong diagnosis.
+mkdir -p "$SC/clientca" && cp ca.pem "$SC/clientca/" && chmod 644 "$SC/clientca/ca.pem"
 echo "ok: CA + broker cert (SAN $BROKER)"
 
 echo "### 2. database"
@@ -163,7 +163,7 @@ if ! podman exec $BROKER /vernemq/bin/vmq-admin listener show 2>/dev/null | grep
 fi
 echo "ok: mqtts listener running"
 
-cli() { podman run --rm --network host -v "$SC/tls:/tls:ro,Z" $CLIIMG "$@" 2>&1; }
+cli() { podman run --rm --network host -v "$SC/clientca:/tls:ro,z" $CLIIMG "$@" 2>&1; }
 
 echo "### stack is up; debug manually"
 
@@ -190,8 +190,20 @@ chk "wrong password is refused" "$(refused "$r")" "$r"
 r=$(cli mosquitto_pub -h localhost -p $HOSTPORT --cafile /tls/ca.pem -i probe -t 'eds/x' -m no)
 chk "anonymous is refused" "$(refused "$r")" "$r"
 
-r=$(cli mosquitto_pub -h localhost -p $HOSTPORT --cafile /tls/ca.pem -i eds-stand-1 -u eds-stand-1 -P edspass -t 'tdemo/lightstand/x/scene' -m hijack)
-chk "eds publishing into tdemo/ is refused   [ADR-0012 §10]" "$(refused "$r")" "$r"
+# A denied PUBLISH cannot be detected from the publisher: MQTT has no
+# acknowledgement that carries a refusal, so a QoS 0 publish looks identical
+# whether the broker delivered it or dropped it on the floor. The only honest
+# question is whether it ARRIVED, so ask the other tenant.
+podman run -d --rm --name smoke-listener-$SUFFIX --network host -v "$SC/clientca:/tls:ro,z" $CLIIMG \
+  mosquitto_sub -h localhost -p $HOSTPORT --cafile /tls/ca.pem \
+  -i tdemo-probe -u tdemo-probe -P tdemopass -t 'tdemo/#' -v >/dev/null 2>&1
+sleep 3
+cli mosquitto_pub -h localhost -p $HOSTPORT --cafile /tls/ca.pem \
+  -i eds-stand-1 -u eds-stand-1 -P edspass -t 'tdemo/lightstand/x/scene' -m HIJACK >/dev/null 2>&1
+sleep 2
+leaked=$(podman logs smoke-listener-$SUFFIX 2>&1 | grep -c HIJACK || true)
+podman rm -f smoke-listener-$SUFFIX >/dev/null 2>&1
+chk "eds publishing into tdemo/ never arrives [ADR-0012 §10]" "$([ "$leaked" = "0" ] && echo 1 || echo 0)" "the other tenant received it"
 
 r=$(cli mosquitto_sub -h localhost -p $HOSTPORT --cafile /tls/ca.pem -i eds-stand-1 -u eds-stand-1 -P edspass -t '#' -W 4 -v)
 chk "eds subscribing to '#' is refused       [ADR-0012 §10]" "$(refused "$r")" "$r"
