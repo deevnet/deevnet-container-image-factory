@@ -19,6 +19,14 @@ IMAGE_PREFIX   ?= deevnet-
 
 IMAGE_DIR  = images/$(IMAGE)
 VERSION    = $(shell cat $(IMAGE_DIR)/version 2>/dev/null)
+# Optional images/<name>/build-args: one KEY=VALUE per line, blank lines and
+# # comments ignored, passed through as --build-arg.
+#
+# This is not decoration. A toolchain pin belongs to the RELEASE being built,
+# not to the recipe: VerneMQ 2.1.1 does not build under the OTP that 2.2.0
+# needs, because newer systools stopped emitting the start.script that 2.1.1's
+# relx overlay copies. Anything that must move when `version` moves lives here.
+BUILD_ARGS = $(shell sed -e 's/#.*//' -e '/^[[:space:]]*$$/d' $(IMAGE_DIR)/build-args 2>/dev/null | sed 's/^/--build-arg /')
 TAG        = $(REGISTRY)/$(IMAGE_PREFIX)$(IMAGE):$(VERSION)
 TARBALL    = $(IMAGE)-$(VERSION).tar
 STAGE_DIR  = $(ARTIFACTS_ROOT)/container-images/$(IMAGE)
@@ -53,6 +61,7 @@ check-image:
 image: check-image
 	podman build \
 	  --build-arg VERSION=$(VERSION) \
+	  $(BUILD_ARGS) \
 	  --label org.opencontainers.image.version=$(VERSION) \
 	  --label org.opencontainers.image.revision=$(COMMIT) \
 	  --label org.opencontainers.image.created=$(BUILT) \

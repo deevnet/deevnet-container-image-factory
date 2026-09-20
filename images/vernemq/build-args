@@ -1,0 +1,11 @@
+# The Erlang/OTP to compile this release with.
+#
+# 27.3.4.16 is what upstream compiles its own 2.2.0 binaries with, per the
+# release notes, so it is the version least likely to surprise us. The README's
+# supported range is wider ("Erlang/OTP 25-28").
+#
+# This moves with `version`. VerneMQ 2.1.1 will NOT build under this OTP: its
+# relx overlay copies releases/<ver>/start.script, which newer systools no
+# longer emits, and `make rel` dies with copy_failed ... enoent after reporting
+# the release assembled. 2.1.1 wants 27.3.3, which is what upstream used for it.
+OTP_VERSION=27.3.4.16
