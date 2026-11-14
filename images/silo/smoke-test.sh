@@ -7,8 +7,9 @@
 #
 #   1  a second If-None-Match: * PUT returns 412, atomically, on a versioned bucket
 #   2  a confined key is refused outside its prefix or bucket; a read-only key every write
-#   3  a bucket quota: an object larger than it is refused at once; past it,
-#      writes are refused once the scanner has counted the bucket (see below)
+#   3  a bucket quota: a single-part upload larger than it is refused at once;
+#      past it, writes are refused once the scanner has counted the bucket (see
+#      below). A multipart upload is counted only after it completes.
 #   4  versioning, switchable
 #   5  lifecycle rules: current and noncurrent expiry
 #   7  the admin API: everything above is set up through it (mc admin, madmin)
@@ -149,7 +150,9 @@ echo "== 3 quota"
 # minute. Measured 2026-11-14 on this release: 6.2 MB accepted against a 1 MiB
 # quota in 63 s. That is why the state store and the bucket store are separate
 # instances on separate disks (ADR-0026 §3, CHG-0068). What is checked here is
-# what silo does promise: an object larger than the quota is refused at once,
+# what silo does promise: a single-part upload larger than the quota is refused
+# at once (a multipart one is not: each part is checked alone, so it is counted
+# only after it completes; CHG-0069 saw 1.2 GB land against 1 GiB),
 # and once the scanner has counted the bucket every write past it is refused,
 # noncurrent versions included.
 mc mb local/quota >/dev/null && mc version enable local/quota >/dev/null && mc quota set local/quota --size 1MiB >/dev/null
