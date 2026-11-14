@@ -6,10 +6,11 @@
 # container image is a service you run.
 #
 # This is deliberately NOT the builder collection's artifacts role. That role
-# PULLS an upstream image and saves it, which is right for minio, postgres,
-# pdns and the Omada controller. An image here exists because the upstream
-# binary cannot simply be pulled - VerneMQ's are EULA-encumbered while its
-# source is Apache-2.0 - so the build recipe is the artifact, and it needs a
+# PULLS an upstream image and saves it, which is right for postgres, pdns and
+# the Omada controller. An image here exists because the upstream binary cannot
+# simply be pulled - VerneMQ's are EULA-encumbered while its source is
+# Apache-2.0, and MinIO's stopped altogether, so silo is built from its fork's
+# source (ADR-0026) - so the build recipe is the artifact, and it needs a
 # commit history of its own.
 
 IMAGE          ?=

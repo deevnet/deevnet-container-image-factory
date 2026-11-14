@@ -1,0 +1,75 @@
+# Silo, the maintained MinIO fork (pgsty/silo), built from source (ADR-0026 §2).
+#
+# Why from source. MinIO's community edition was archived on 2026-04-25 and
+# ships source only, so the site's store stopped getting fixes. ADR-0026 picks
+# pgsty/silo, which keeps MinIO's S3 behavior and on-disk format, and has the
+# site build it itself: the problem being solved is a supply chain that
+# stopped, so the recipe is the artifact. The fork's own image is a fallback,
+# not the supply.
+#
+# What the image must carry beyond the server. The store role and the backup
+# job both run `mc` inside it, under `sh` (`podman exec minio mc ...`, and
+# `podman run --entrypoint sh <image> -c 'mc ...'`). Silo's distroless image has
+# neither, so this one adds pgsty/mc, the fork of mc released alongside silo,
+# also built from source, on a base that has a shell.
+#
+# Base images are fully qualified: podman refuses short names when it cannot
+# prompt, which is every non-interactive build.
+
+# VERSION is the silo release tag, from images/silo/version. GO_VERSION and
+# MC_VERSION come from build-args, because they move with the release.
+ARG VERSION
+ARG GO_VERSION=1.27.4
+ARG MC_VERSION
+
+# --- build -------------------------------------------------------------------
+FROM docker.io/library/golang:${GO_VERSION}-alpine AS build
+
+RUN apk add --no-cache git
+
+ENV CGO_ENABLED=0 GOFLAGS=-trimpath
+
+# The server. The flags are upstream's own `make build`: the kqueue tag, and
+# ldflags from buildscripts/gen-ldflags.go, which stamps the release and commit
+# into `silo --version`. Left alone it stamps DEVELOPMENT.<commit time>; a
+# release build passes MINIO_RELEASE=RELEASE and the tag's own time, so the
+# binary names the release it is ("RELEASE.2026-11-12T00-00-00Z" ->
+# 2026-11-12T00:00:00Z). mc's script reads MC_RELEASE the same way.
+ARG VERSION
+WORKDIR /src/silo
+RUN git clone --depth 1 --branch "${VERSION}" https://github.com/pgsty/silo.git . \
+ && git rev-parse HEAD > /SILO_COMMIT \
+ && rel_time="$(echo "${VERSION#RELEASE.}" | sed 's/T\(..\)-\(..\)-\(..\)Z$/T\1:\2:\3Z/')" \
+ && go build -tags kqueue --ldflags "$(MINIO_RELEASE=RELEASE go run buildscripts/gen-ldflags.go "$rel_time")" -o /out/silo
+
+# The client. The same flags from mc's own Makefile.
+ARG MC_VERSION
+WORKDIR /src/mc
+RUN git clone --depth 1 --branch "${MC_VERSION}" https://github.com/pgsty/mc.git . \
+ && git rev-parse HEAD > /MC_COMMIT \
+ && rel_time="$(echo "${MC_VERSION#RELEASE.}" | sed 's/T\(..\)-\(..\)-\(..\)Z$/T\1:\2:\3Z/')" \
+ && go build -tags kqueue --ldflags "$(MC_RELEASE=RELEASE go run buildscripts/gen-ldflags.go "$rel_time")" -o /out/mc
+
+# --- runtime -----------------------------------------------------------------
+# UBI minimal is what MinIO's own image was built on, so the image the role and
+# the backup job already know keeps its shape: a shell, a CA bundle, and the
+# binaries in /usr/bin. Pinned to a minor release, as the build base is pinned.
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.9
+
+COPY --from=build /out/silo /usr/bin/silo
+COPY --from=build /out/mc /usr/bin/mc
+COPY --from=build /SILO_COMMIT /MC_COMMIT /usr/share/silo/
+COPY --from=build /src/silo/LICENSE /src/silo/NOTICE /src/silo/CREDITS /licenses/
+
+# `minio` names the same server, so anything that still calls it by its old
+# name keeps working until it is renamed.
+RUN ln -s silo /usr/bin/minio \
+ && mkdir -p /data
+
+# Runs as root, as MinIO's image did: the data directory copied from MinIO is
+# owned that way (CHG-0068), and the role publishes only to loopback.
+EXPOSE 9000 9001
+VOLUME ["/data"]
+
+ENTRYPOINT ["/usr/bin/silo"]
+CMD ["server", "/data"]

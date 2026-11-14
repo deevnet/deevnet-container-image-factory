@@ -8,10 +8,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 the substrate runs. It is the sibling of `deevnet-image-factory`, which bakes OS images with
 Packer; this bakes service images with podman.
 
-It exists for one specific case: software whose **source** we may use but whose **binaries** we may
-not. Anything that can simply be pulled belongs in the builder collection's `artifacts` role
-(`artifacts_podman_images`) instead, which is where minio, postgres, pdns-auth and the Omada
-controller come from. Don't move those here.
+It exists for two cases:
+- **Software whose source we may use but whose binaries we may not**, such as VerneMQ.
+- **Software whose supply chain stopped**, so the site builds it itself from a maintained source, such
+  as silo, which replaces MinIO (ADR-0026 §2).
+
+Anything that can simply be pulled belongs in the builder collection's `artifacts` role
+(`artifacts_podman_images`) instead, which is where postgres, pdns-auth and the Omada controller come
+from. Don't move those here.
 
 ## Commands
 
@@ -42,4 +46,5 @@ make stage IMAGE=<name>     # build, then save under /srv/deevnet-http/container
 
 | Image | Why from source |
 |---|---|
+| `silo` | ADR-0026 §2. MinIO's community repository was archived on 2026-04-25 (*"We will no longer provide pre-compiled binary releases"*). pgsty/silo, a maintained fork under AGPL-3.0, is built here with pgsty/mc, because the store role and the backup job run `mc` inside the image. |
 | `vernemq` | ADR-0012 §8. Upstream's 2.2.0 release notes: *"VerneMQ binary software distribution packages and Docker images are covered by the VerneMQ EULA."* The source is Apache-2.0. |
