@@ -1,0 +1,11 @@
+# The Go toolchain and the mc release to build beside this silo release.
+#
+# Go 1.27.4 is what this release's go.mod asks for ("go 1.27.4"), and what
+# upstream builds its own image with (golang:1.27.4-alpine in
+# Dockerfile.goreleaser).
+#
+# MC_VERSION is pgsty/mc, released on the same tag as silo; upstream's image
+# pins the same one (MC_VERSION in Dockerfile.goreleaser). Both move with
+# `version`.
+GO_VERSION=1.27.4
+MC_VERSION=RELEASE.2026-11-12T00-00-00Z
