@@ -36,7 +36,7 @@ BUILT      = $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 IMAGES = $(notdir $(wildcard images/*))
 
-.PHONY: default help list check-image image stage clean
+.PHONY: default help list check-image image stage binary clean
 
 default: help
 
@@ -45,6 +45,8 @@ help:
 	@echo "  list    the images this factory can build"
 	@echo "  image   podman build"
 	@echo "  stage   image, then save it under $(ARTIFACTS_ROOT)/container-images/<name> (sudo)"
+	@echo "  binary  IMAGE=silo ARCH=arm64: the server alone, cross-built from the same recipe,"
+	@echo "          staged under $(ARTIFACTS_ROOT)/binaries/<name> (sudo; the take-home Pi, CHG-0073)"
 	@echo "  clean   remove built tarballs"
 	@echo ""
 	@echo "Images: $(IMAGES)"
@@ -84,6 +86,31 @@ stage: image
 	sudo install -o nginx -g nginx -m 0644 bin/$(TARBALL) $(STAGE_DIR)/$(TARBALL)
 	sudo ln -sfn $(TARBALL) $(STAGE_DIR)/$(IMAGE)-latest.tar
 	@echo "staged $(STAGE_DIR)/$(TARBALL) from $(COMMIT)"
+
+# The server alone, for another architecture, from the image's own build stage:
+# the same source tag, toolchain and flags as the image Deevnet runs. Only an
+# image whose build stage writes /out/<name> and honors GOARCH can do this;
+# silo's does (CHG-0073). The same dirty-tree rule as stage.
+ARCH     ?= arm64
+BIN_DIR   = $(ARTIFACTS_ROOT)/binaries/$(IMAGE)
+BIN_NAME  = $(IMAGE)-$(VERSION)-linux-$(ARCH)
+BIN_TAG   = $(REGISTRY)/$(IMAGE_PREFIX)$(IMAGE)-build:$(VERSION)-$(ARCH)
+BIN_MAGIC = $(if $(filter arm64,$(ARCH)),ARM aarch64,x86-64)
+
+binary: check-image
+	@case "$(COMMIT)" in *-dirty|unknown) echo "refusing to stage from a dirty or untracked tree ($(COMMIT)); commit first" >&2; exit 1;; esac
+	podman build --target build \
+	  --build-arg VERSION=$(VERSION) --build-arg GOARCH=$(ARCH) \
+	  $(BUILD_ARGS) \
+	  -t $(BIN_TAG) \
+	  -f $(IMAGE_DIR)/Containerfile $(IMAGE_DIR)
+	@mkdir -p bin
+	cid=$$(podman create $(BIN_TAG)) && podman cp $$cid:/out/$(IMAGE) bin/$(BIN_NAME); rc=$$?; podman rm -f $$cid >/dev/null; exit $$rc
+	@file bin/$(BIN_NAME) | grep -q "$(BIN_MAGIC)" || { echo "bin/$(BIN_NAME) is not a $(ARCH) binary" >&2; exit 1; }
+	cd bin && sha256sum $(BIN_NAME) > $(BIN_NAME).sha256
+	sudo install -d -o nginx -g nginx -m 0755 $(BIN_DIR)
+	sudo install -o nginx -g nginx -m 0644 bin/$(BIN_NAME) bin/$(BIN_NAME).sha256 $(BIN_DIR)/
+	@echo "staged $(BIN_DIR)/$(BIN_NAME) from $(COMMIT)"
 
 clean:
 	rm -rf bin

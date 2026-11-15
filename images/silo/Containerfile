@@ -35,12 +35,19 @@ ENV CGO_ENABLED=0 GOFLAGS=-trimpath
 # release build passes MINIO_RELEASE=RELEASE and the tag's own time, so the
 # binary names the release it is ("RELEASE.2026-11-12T00-00-00Z" ->
 # 2026-11-12T00:00:00Z). mc's script reads MC_RELEASE the same way.
+#
+# GOARCH, empty by default, builds for the build host. `make binary IMAGE=silo
+# ARCH=arm64` sets it to cross-compile the server alone for a take-home Pi
+# (CHG-0073). gen-ldflags still runs natively: only the go build is cross,
+# and CGO is off, so nothing else changes.
 ARG VERSION
+ARG GOARCH=
 WORKDIR /src/silo
 RUN git clone --depth 1 --branch "${VERSION}" https://github.com/pgsty/silo.git . \
  && git rev-parse HEAD > /SILO_COMMIT \
  && rel_time="$(echo "${VERSION#RELEASE.}" | sed 's/T\(..\)-\(..\)-\(..\)Z$/T\1:\2:\3Z/')" \
- && go build -tags kqueue --ldflags "$(MINIO_RELEASE=RELEASE go run buildscripts/gen-ldflags.go "$rel_time")" -o /out/silo
+ && ldflags="$(MINIO_RELEASE=RELEASE go run buildscripts/gen-ldflags.go "$rel_time")" \
+ && env ${GOARCH:+GOARCH=$GOARCH} go build -tags kqueue --ldflags "$ldflags" -o /out/silo
 
 # The client. The same flags from mc's own Makefile.
 ARG MC_VERSION
